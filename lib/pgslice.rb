@@ -51,7 +51,7 @@ module PgSlice
 
     def prep
       table, column, period = arguments
-      intermediate_table = "#{table}_intermediate"
+      partitions_table = "#{table}_partitions"
       trigger_name = self.trigger_name(table)
 
       if options[:no_partition]
@@ -60,7 +60,7 @@ module PgSlice
         abort "Usage: pgslice prep <table> <column> <period>" if arguments.length != 3
       end
       abort "Table not found: #{table}" unless table_exists?(table)
-      abort "Table already exists: #{intermediate_table}" if table_exists?(intermediate_table)
+      abort "Table already exists: #{partitions_table}" if table_exists?(partitions_table)
 
       unless options[:no_partition]
         abort "Column not found: #{column}" unless columns(table).include?(column)
@@ -70,7 +70,7 @@ module PgSlice
       queries = []
 
       queries << <<-SQL
-CREATE TABLE #{intermediate_table} (LIKE #{table} INCLUDING ALL);
+CREATE TABLE #{partitions_table} (LIKE #{table} INCLUDING ALL);
       SQL
 
       unless options[:no_partition]
@@ -86,12 +86,12 @@ CREATE FUNCTION #{trigger_name}()
 
         queries << <<-SQL
 CREATE TRIGGER #{trigger_name}
-    BEFORE INSERT ON #{intermediate_table}
+    BEFORE INSERT ON #{partitions_table}
     FOR EACH ROW EXECUTE PROCEDURE #{trigger_name}();
       SQL
 
         queries << <<-SQL
-COMMENT ON TRIGGER #{trigger_name} ON #{intermediate_table} is 'column:#{column},period:#{period}';
+COMMENT ON TRIGGER #{trigger_name} ON #{partitions_table} is 'column:#{column},period:#{period}';
 SQL
       end
 
@@ -100,14 +100,14 @@ SQL
 
     def unprep
       table = arguments.first
-      intermediate_table = "#{table}_intermediate"
+      partitions_table = "#{table}_partitions"
       trigger_name = self.trigger_name(table)
 
       abort "Usage: pgslice unprep <table>" if arguments.length != 1
-      abort "Table not found: #{intermediate_table}" unless table_exists?(intermediate_table)
+      abort "Table not found: #{partitions_table}" unless table_exists?(partitions_table)
 
       queries = [
-        "DROP TABLE #{intermediate_table} CASCADE;",
+        "DROP TABLE #{partitions_table} CASCADE;",
         "DROP FUNCTION IF EXISTS #{trigger_name}();"
       ]
       run_queries(queries)
@@ -115,7 +115,7 @@ SQL
 
     def add_partitions
       original_table = arguments.first
-      table = options[:intermediate] ? "#{original_table}_intermediate" : original_table
+      table = options[:partitions] ? "#{original_table}_partitions" : original_table
       trigger_name = self.trigger_name(original_table)
 
       abort "Usage: pgslice add_partitions <table>" if arguments.length != 1
@@ -126,7 +126,7 @@ SQL
       range = (-1 * past)..future
 
       # ensure table has trigger
-      abort "No trigger on table: #{table}\nDid you mean to use --intermediate?" unless has_trigger?(trigger_name, table)
+      abort "No trigger on table: #{table}\nDid you mean to use --partitions?" unless has_trigger?(trigger_name, table)
 
       index_defs = execute("select pg_get_indexdef(indexrelid) from pg_index where indrelid = $1::regclass AND indisprimary = 'f'", [original_table]).map { |r| r["pg_get_indexdef"] }
       primary_key = self.primary_key(table)
@@ -220,7 +220,7 @@ CREATE OR REPLACE FUNCTION #{trigger_name}()
         dest_table = table
       else
         source_table ||= table
-        dest_table = intermediate_name(table)
+        dest_table = partitions_name(table)
       end
 
       abort "Table not found: #{source_table}" unless table_exists?(source_table)
@@ -291,17 +291,17 @@ INSERT INTO #{dest_table} (#{fields})
 
     def swap
       table = arguments.first
-      intermediate_table = intermediate_name(table)
+      partitions_table = partitions_name(table)
       retired_table = retired_name(table)
 
       abort "Usage: pgslice swap <table>" if arguments.length != 1
       abort "Table not found: #{table}" unless table_exists?(table)
-      abort "Table not found: #{intermediate_table}" unless table_exists?(intermediate_table)
+      abort "Table not found: #{partitions_table}" unless table_exists?(partitions_table)
       abort "Table already exists: #{retired_table}" if table_exists?(retired_table)
 
       queries = [
         "ALTER TABLE #{table} RENAME TO #{retired_table};",
-        "ALTER TABLE #{intermediate_table} RENAME TO #{table};"
+        "ALTER TABLE #{partitions_table} RENAME TO #{table};"
       ]
 
       self.sequences(table).each do |sequence|
@@ -313,16 +313,16 @@ INSERT INTO #{dest_table} (#{fields})
 
     def unswap
       table = arguments.first
-      intermediate_table = intermediate_name(table)
+      partitions_table = partitions_name(table)
       retired_table = retired_name(table)
 
       abort "Usage: pgslice unswap <table>" if arguments.length != 1
       abort "Table not found: #{table}" unless table_exists?(table)
       abort "Table not found: #{retired_table}" unless table_exists?(retired_table)
-      abort "Table already exists: #{intermediate_table}" if table_exists?(intermediate_table)
+      abort "Table already exists: #{partitions_table}" if table_exists?(partitions_table)
 
       queries = [
-        "ALTER TABLE #{table} RENAME TO #{intermediate_table};",
+        "ALTER TABLE #{table} RENAME TO #{partitions_table};",
         "ALTER TABLE #{retired_table} RENAME TO #{table};"
       ]
 
@@ -337,7 +337,7 @@ INSERT INTO #{dest_table} (#{fields})
 
     def parse_args(args)
       opts = Slop.parse(args) do |o|
-        o.boolean "--intermediate"
+        o.boolean "--partitions"
         o.boolean "--swapped"
         o.float "--sleep"
         o.integer "--future", default: 0
@@ -487,8 +487,8 @@ INSERT INTO #{dest_table} (#{fields})
       "#{table}_insert_trigger"
     end
 
-    def intermediate_name(table)
-      "#{table}_intermediate"
+    def partitions_name(table)
+      "#{table}_partitions"
     end
 
     def retired_name(table)
